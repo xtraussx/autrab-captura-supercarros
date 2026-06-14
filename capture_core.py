@@ -1,8 +1,8 @@
-"""Nucleo de captura supercarros: fetch (usados, paginado) -> parse -> FX -> agrega.
-Logica VALIDADA localmente con datos reales (2026-06-12)."""
+"""Nucleo de captura supercarros POR MARCA + modelo extraido del titulo (coarse).
+Maneja marcas agrupadas (BMW X5 bajo 'x', etc.). Logica validada con datos reales (2026-06-13)."""
 import asyncio, re, statistics, urllib.request, json
 from patchright.async_api import async_playwright
-from sv_resolver import descargar_sv, resolver, url_busqueda
+from sv_resolver import descargar_sv, parse_brands
 
 CARD_TXT = re.compile(r'(US\$|RD\$)\s*([\d.,]+)\s+(.*)', re.S)
 
@@ -14,15 +14,13 @@ ANCHOR_JS = r"""
     if(!re.test(path)) return; if(seen.has(a.href)) return; seen.add(a.href);
     out.push((a.innerText||a.textContent||'').replace(/\s+/g,' ').trim());
   });
-  const total=document.querySelector('#UpperCounter2')?.innerText||'';
-  return {total, cards:out};
+  return out;
 }
 """
 
 def fx_dop_per_usd(default=60.0):
     try:
-        req = urllib.request.Request("https://open.er-api.com/v6/latest/USD",
-                                     headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request("https://open.er-api.com/v6/latest/USD", headers={"User-Agent": "Mozilla/5.0"})
         data = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
         rate = data.get("rates", {}).get("DOP")
         if rate and rate > 1:
@@ -48,29 +46,52 @@ def a_usd(monto, moneda, dop_per_usd):
         return None
     return float(monto) if moneda == "USD" else round(monto / dop_per_usd, 2)
 
-async def fetch_listings(brand_id, model_id, condicion="usado", max_pages=10):
+def modelo_coarse(titulo, marca):
+    """Extrae el modelo del titulo: 'BMW X 5 M Package' -> 'x5', 'Toyota Corolla LE' -> 'corolla'."""
+    t = re.sub(r'^(US\$|RD\$)\s*[\d.,]+\s*', '', titulo)
+    t = re.split(r'\b(19\d\d|20\d\d)\b', t)[0].strip()
+    m = marca.strip().lower()
+    if t.lower().startswith(m):
+        t = t[len(m):].strip()
+    toks = t.split()
+    if not toks:
+        return ''
+    if len(toks) >= 2 and re.fullmatch(r'[A-Za-z]{1,2}', toks[0]) and re.match(r'^\d', toks[1]):
+        return (toks[0] + toks[1]).lower()
+    return re.sub(r'[^a-z0-9]', '', toks[0].lower())
+
+async def fetch_brand(brand_id, max_pages=12):
     cards = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx = await browser.new_context(locale="es-DO", viewport={"width": 1280, "height": 900})
         page = await ctx.new_page()
         for pg in range(max_pages):
-            url = url_busqueda(brand_id, model_id, condicion, page=pg)
+            url = f"https://www.supercarros.com/buscar/?do=1&ObjectType=1&Brand={brand_id}&Condition=252"
+            if pg:
+                url += f"&PagingPageSkip={pg}"
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
-            data = await page.evaluate(ANCHOR_JS)
-            cards.extend(data["cards"])
-            if len(data["cards"]) < 24:
+            c = await page.evaluate(ANCHOR_JS)
+            cards.extend(c)
+            if len(c) < 24:
                 break
         await browser.close()
     return cards
 
-def agregar(parsed, marca, modelo):
+def agregar(cards, marca, dop):
     grupos = {}
-    for r in parsed:
-        if not r or r["precio_usd"] is None or r["anio"] is None or r["condicion"] != "usado":
+    for txt in cards:
+        pc = parse_card(txt)
+        if not pc or pc["anio"] is None or pc["condicion"] != "usado":
             continue
-        grupos.setdefault((marca.lower(), modelo.lower(), r["anio"], "usado"), []).append(r["precio_usd"])
+        usd = a_usd(pc["monto"], pc["moneda"], dop)
+        if usd is None:
+            continue
+        mod = modelo_coarse(txt, marca)
+        if not mod:
+            continue
+        grupos.setdefault((marca.lower(), mod, pc["anio"], "usado"), []).append(usd)
     filas = []
     for (ma, mo, an, co), precios in sorted(grupos.items()):
         filas.append({"marca": ma, "modelo": mo, "anio": an, "condicion": co,
@@ -81,18 +102,20 @@ def agregar(parsed, marca, modelo):
                       "precio_mediana_usd": round(statistics.median(precios), 2)})
     return filas
 
-async def capturar(marca, modelo, max_pages=10, js=None, dop=None):
+def todas_las_marcas(js=None):
+    """Lista de marcas 'reales' (nombre alfabetico, len>=2) del catalogo supercarros."""
     js = js or descargar_sv()
-    r = resolver(marca, modelo, js)
-    if not r["ok"]:
-        return {"ok": False, "error": r["error"], "filas": []}
+    b = parse_brands(js)
+    return sorted(k for k in b if re.search(r'[a-z]', k) and len(k) >= 2)
+
+async def capturar_marca(marca, max_pages=12, js=None, dop=None):
+    """Captura TODA la marca (todos sus modelos) y agrega por (marca, modelo_coarse, anio)."""
+    js = js or descargar_sv()
+    brands = parse_brands(js)
+    bid = brands.get(marca.strip().lower())
+    if not bid:
+        return {"ok": False, "error": f"marca '{marca}' no encontrada", "filas": []}
     dop = dop or fx_dop_per_usd()
-    cards = await fetch_listings(r["brand_id"], r["model_id"], "usado", max_pages)
-    parsed = []
-    for c in cards:
-        pc = parse_card(c)
-        if pc:
-            pc["precio_usd"] = a_usd(pc["monto"], pc["moneda"], dop)
-            parsed.append(pc)
-    return {"ok": True, "error": None, "filas": agregar(parsed, marca, modelo),
-            "brand_id": r["brand_id"], "model_id": r["model_id"], "fx": dop, "n_cards": len(cards)}
+    cards = await fetch_brand(bid, max_pages)
+    return {"ok": True, "error": None, "filas": agregar(cards, marca, dop),
+            "brand_id": bid, "fx": dop, "n_cards": len(cards)}

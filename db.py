@@ -1,4 +1,4 @@
-"""Capa Postgres del contenedor de captura (psycopg2). Mismo SQL validado via webhook en dev."""
+"""Capa Postgres del contenedor de captura (psycopg2). Captura POR MARCA."""
 import os, psycopg2, psycopg2.extras
 
 def conn():
@@ -7,9 +7,16 @@ def conn():
         raise SystemExit("Falta DATABASE_URL (ej. postgres://user:pass@host:5432/db)")
     return psycopg2.connect(dsn)
 
-def leer_pendientes(cur):
-    cur.execute("SELECT marca, modelo, anio FROM supercarros_pendientes WHERE capturado = false")
-    return cur.fetchall()
+def marcas_pendientes(cur):
+    """Marcas distintas con algo pendiente de capturar."""
+    cur.execute("SELECT DISTINCT lower(marca) FROM supercarros_pendientes WHERE capturado = false")
+    return [r[0] for r in cur.fetchall()]
+
+def marcas_a_refrescar(cur, dias=30):
+    """Marcas con data mas vieja que N dias."""
+    cur.execute("SELECT DISTINCT lower(marca) FROM supercarros_precios "
+                "WHERE fecha_captura < now() - (%s || ' days')::interval", (dias,))
+    return [r[0] for r in cur.fetchall()]
 
 def upsert_precios(cur, filas):
     if not filas:
@@ -28,12 +35,5 @@ def upsert_precios(cur, filas):
     psycopg2.extras.execute_batch(cur, sql, filas)
     return len(filas)
 
-def marcar_capturado(cur, marca, modelo):
-    cur.execute("UPDATE supercarros_pendientes SET capturado=true "
-                "WHERE lower(marca)=lower(%s) AND lower(modelo)=lower(%s)", (marca, modelo))
-
-def modelos_a_refrescar(cur, dias=30):
-    """Modelos ya capturados pero con data mas vieja que N dias (para re-scrapear)."""
-    cur.execute("SELECT DISTINCT marca, modelo FROM supercarros_precios "
-                "WHERE fecha_captura < now() - (%s || ' days')::interval", (dias,))
-    return cur.fetchall()
+def marcar_marca_capturada(cur, marca):
+    cur.execute("UPDATE supercarros_pendientes SET capturado=true WHERE lower(marca)=lower(%s)", (marca,))
