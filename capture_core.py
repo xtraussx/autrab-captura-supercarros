@@ -70,9 +70,14 @@ async def fetch_brand(brand_id, max_pages=12):
             url = f"https://www.supercarros.com/buscar/?do=1&ObjectType=1&Brand={brand_id}&Condition=252"
             if pg:
                 url += f"&PagingPageSkip={pg}"
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(3000)
-            c = await page.evaluate(ANCHOR_JS)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(3000)
+                c = await page.evaluate(ANCHOR_JS)
+            except Exception as e:
+                # una pagina lenta/caida no debe tumbar la marca: usar lo que se haya logrado
+                print(f"    [warn] brand={brand_id} pag {pg}: {type(e).__name__}", flush=True)
+                break
             cards.extend(c)
             if len(c) < 24:
                 break

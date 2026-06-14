@@ -8,21 +8,36 @@ REFRESH_DIAS = int(os.environ.get("REFRESH_DIAS", "30"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "12"))
 ALL_BRANDS = os.environ.get("ALL_BRANDS", "1") == "1"  # catalogo completo (recomendado)
 
+def _guardar(filas, marca):
+    """Abre conexion FRESCA solo para el upsert (evita timeout por conexion ociosa durante el scraping)."""
+    cn = db.conn(); cn.autocommit = False
+    try:
+        cur = cn.cursor()
+        n = db.upsert_precios(cur, filas)
+        db.marcar_marca_capturada(cur, marca)
+        cn.commit()
+        return n
+    except Exception:
+        cn.rollback(); raise
+    finally:
+        cn.close()
+
 async def main():
     js = descargar_sv()
     dop = fx_dop_per_usd()
     print(f"[capture] FX 1USD={dop} DOP | refresco>{REFRESH_DIAS}d | max_pages={MAX_PAGES} | all_brands={ALL_BRANDS}", flush=True)
-    cn = db.conn(); cn.autocommit = False
-    cur = cn.cursor()
 
     if ALL_BRANDS:
         marcas = todas_las_marcas(js)
         print(f"[capture] CATALOGO COMPLETO: {len(marcas)} marcas", flush=True)
     else:
-        pend = db.marcas_pendientes(cur)
-        refr = db.marcas_a_refrescar(cur, REFRESH_DIAS)
-        marcas = []
-        seen = set()
+        cn = db.conn(); cur = cn.cursor()
+        try:
+            pend = db.marcas_pendientes(cur)
+            refr = db.marcas_a_refrescar(cur, REFRESH_DIAS)
+        finally:
+            cn.close()
+        marcas, seen = [], set()
         for m in list(pend) + list(refr):
             if m in seen:
                 continue
@@ -31,19 +46,18 @@ async def main():
 
     for ma in marcas:
         try:
-            res = await capturar_marca(ma, max_pages=MAX_PAGES, js=js, dop=dop)
+            res = await capturar_marca(ma, max_pages=MAX_PAGES, js=js, dop=dop)  # scraping SIN conexion DB abierta
             if not res["ok"]:
                 print(f"  [skip] {ma}: {res['error']}", flush=True)
                 continue
-            n = db.upsert_precios(cur, res["filas"])
-            db.marcar_marca_capturada(cur, ma)
-            cn.commit()
+            if not res["filas"]:
+                print(f"  [ok] {ma}: {res['n_cards']} cards -> 0 filas", flush=True)
+                continue
+            n = _guardar(res["filas"], ma)
             print(f"  [ok] {ma}: {res['n_cards']} cards -> {n} filas (modelo-anio)", flush=True)
         except Exception as e:
-            cn.rollback()
             print(f"  [error] {ma}: {type(e).__name__}: {e}", flush=True)
 
-    cur.close(); cn.close()
     print("[capture] fin", flush=True)
 
 def _run_once():
