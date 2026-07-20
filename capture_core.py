@@ -46,8 +46,17 @@ def a_usd(monto, moneda, dop_per_usd):
         return None
     return float(monto) if moneda == "USD" else round(monto / dop_per_usd, 2)
 
+# Modelos cuyo nombre real une un digito con la palabra siguiente: "4 Runner" -> "4runner".
+# NO se puede generalizar a "digito + palabra": verificado contra titulos reales (2026-07-20),
+# Mazda publica "6 Sport" / "6 Grand Touring" donde el modelo es solo "6" y lo demas es trim,
+# y Ram publica "1500 Laramie" / "700 SLT". Por eso la union va por lista explicita.
+COMPUESTOS_DIGITO = {
+    ("toyota", "4", "runner"),
+}
+
 def modelo_coarse(titulo, marca):
-    """Extrae el modelo del titulo: 'BMW X 5 M Package' -> 'x5', 'Toyota Corolla LE' -> 'corolla'."""
+    """Extrae el modelo del titulo: 'BMW X 5 M Package' -> 'x5', 'Toyota Corolla LE' -> 'corolla',
+    'Toyota 4 Runner SR5' -> '4runner'."""
     t = re.sub(r'^(US\$|RD\$)\s*[\d.,]+\s*', '', titulo)
     t = re.split(r'\b(19\d\d|20\d\d)\b', t)[0].strip()
     m = marca.strip().lower()
@@ -58,6 +67,11 @@ def modelo_coarse(titulo, marca):
         return ''
     if len(toks) >= 2 and re.fullmatch(r'[A-Za-z]{1,2}', toks[0]) and re.match(r'^\d', toks[1]):
         return (toks[0] + toks[1]).lower()
+    if len(toks) >= 2:
+        cab = re.sub(r'[^a-z0-9]', '', toks[0].lower())
+        sig = re.sub(r'[^a-z0-9]', '', toks[1].lower())
+        if (m, cab, sig) in COMPUESTOS_DIGITO:
+            return cab + sig
     return re.sub(r'[^a-z0-9]', '', toks[0].lower())
 
 async def fetch_brand(brand_id, max_pages=12):
