@@ -65,6 +65,15 @@ def modelo_coarse(titulo, marca):
     toks = t.split()
     if not toks:
         return ''
+    # Mercedes titula "Clase GLC 300", "Clase C 63s AMG": el modelo base es la palabra tras
+    # "Clase"/"Class", y el numero que sigue es el trim/motor AMG (NO parte del modelo, a
+    # diferencia de BMW "X 5"->x5). Agrupamos por letras iniciales: "GLC 300"->glc, "C 63s"->c,
+    # "G 63"->g (verificado 2026-07-20). Sin esto todo Mercedes colapsa a "clase" y ningun lead
+    # (GLC/GLE/C/E...) matchea. Ninguna otra marca usa "Clase" como modelo -> regla segura.
+    if toks[0].lower() in ('clase', 'class') and len(toks) >= 2:
+        base = re.match(r'[a-z]+', toks[1].lower())
+        if base:
+            return base.group(0)
     if len(toks) >= 2 and re.fullmatch(r'[A-Za-z]{1,2}', toks[0]) and re.match(r'^\d', toks[1]):
         return (toks[0] + toks[1]).lower()
     if len(toks) >= 2:
